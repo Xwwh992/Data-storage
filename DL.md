@@ -1,5 +1,10 @@
+# DL
+
 - **K折交叉验证**
+- **`isinstance()`**用来判断实例对象是否属于某个类。对象不属于类时候可以用于判定然后做类的转换再使用
+
 - 卷积核在卷积操作中的作用确实可以理解为衡量它与对应图像区块之间的**相似程度**
+
 - 重点关注**减少泛化误差**，过度训练会导致与训练集很相似，但是没办法应对测试集，最好是在最优处减少泛化与训练误差的差距
 
 - **LayerNorm** 的归一化是针对单个样本进行的，不依赖于批次大小
@@ -20,7 +25,7 @@
 
 - **删除偶数下表**标元素(C++20)
 
-  ```c++
+```c++
   #include <iostream>
   #include <vector>
   #include <algorithm>  // for std::erase_if
@@ -36,14 +41,11 @@
       }
       return 0;
   }
-  ```
+```
 
-  ---
+---
 
-  
-
-- **`isinstance()`**用来判断实例对象是否属于某个类。对象不属于类时候可以用于判定然后做类的转换再使用
-- 建立一个**神经网络的数据类型并实现反向传播**
+## 反向传播
 
 ```python
 class Value:
@@ -52,16 +54,16 @@ class Value:
     self.data = data
     self.grad = 0.0
     self._backward = lambda: None
-    self._prev = set(_children)
-    self._op = _op
-    self.label = label
+    self._prev = set(_children)  # 记录前驱节点
+    self._op = _op    # 记录运算符号
+    self.label = label   #记录变量的名字
 
   def __repr__(self):
     return f"Value(data={self.data})"
   
   def __add__(self, other):
     other = other if isinstance(other, Value) else Value(other)
-    out = Value(self.data + other.data, (self, other), '+')
+    out = Value(self.data + other.data, (self, other), '+')   #加法不改变梯度
     
     def _backward():
       self.grad += 1.0 * out.grad
@@ -70,7 +72,7 @@ class Value:
     
     return out
 
-  def __mul__(self, other):
+  def __mul__(self, other): # 乘法用local gradient * 传递过来的梯度
     other = other if isinstance(other, Value) else Value(other)
     out = Value(self.data * other.data, (self, other), '*')
     
@@ -112,7 +114,7 @@ class Value:
     out = Value(t, (self, ), 'tanh')
     
     def _backward():
-      self.grad += (1 - t**2) * out.grad
+      self.grad += (1 - t**2) * out.grad     #tanh的导数
     out._backward = _backward
     
     return out
@@ -140,8 +142,82 @@ class Value:
         topo.append(v)
     build_topo(self)
     
-    self.grad = 1.0
+    self.grad = 1.0      #自身对自身的梯度是1
     for node in reversed(topo):
       node._backward()
+```
+
+## 生成MLP(Perceptron)
+
+```python
+class Neuron:
+  
+  def __init__(self, nin):
+    self.w = [Value(random.uniform(-1,1)) for _ in range(nin)] # 生成对应输入个数维数的权重 转化成了Value型
+    self.b = Value(random.uniform(-1,1))
+  
+  def __call__(self, x):
+    # w * x + b
+    act = sum((wi*xi for wi, xi in zip(self.w, x)), self.b)   # 计算w*x+b
+    out = act.tanh()    # 激活函数
+    return out
+  
+  def parameters(self):
+    return self.w + [self.b]
+
+class Layer:
+  
+  def __init__(self, nin, nout):
+    self.neurons = [Neuron(nin) for _ in range(nout)]  # 生成的神经元的个数取决于有几个输出 输入用来计算输出值
+  
+  def __call__(self, x):
+    outs = [n(x) for n in self.neurons] # n是neurons中的元素，而neurous是一个neuron列表。每个neuron对象在创建的时候 													         		 	 # 就已经被实例化，按照简单的循环理解即可。
+    return outs[0] if len(outs) == 1 else outs
+  
+  def parameters(self):
+    return [p for neuron in self.neurons for p in neuron.parameters()]
+			# 最里面的for循环的变量和最外面的变量名字应该对应，使用了嵌套循环
+class MLP:
+  
+  def __init__(self, nin, nouts):
+    sz = [nin] + nouts # 把输入层、隐含层和输出层合并成一个列表
+    self.layers = [Layer(sz[i], sz[i+1]) for i in range(len(nouts))]  # 调用layer层生成每层神经元，同时生成多个层
+  																																# 每层的神经元个数取决于这一层要向下一层输出多少
+  def __call__(self, x):
+    for layer in self.layers:
+      x = layer(x)
+    return x
+  
+  def parameters(self):
+    return [p for layer in self.layers for p in layer.parameters()]
+```
+
+- **gradient可以看成指向loss增加的向量**
+## 梯度下降
+
+```python
+xs = [
+  [2.0, 3.0, -1.0],
+  [3.0, -1.0, 0.5],
+  [0.5, 1.0, 1.0],
+  [1.0, 1.0, -1.0],
+]
+ys = [1.0, -1.0, -1.0, 1.0] # desired targets
+for k in range(20):
+  
+  # forward pass
+  ypred = [n(x) for x in xs]      # 可以选择不同的损失函数
+  loss = sum((yout - ygt)**2 for ygt, yout in zip(ys, ypred))
+  
+  # backward pass
+  for p in n.parameters():
+    p.grad = 0.0       # 在新一次的反向传播前一定要梯度归零
+  loss.backward()
+  
+  # update
+  for p in n.parameters():     # 手动的梯度下降  可以采取 learning_rate = 1.0 - 0.9*k/100
+    p.data += -0.1 * p.grad
+  
+  print(k, loss.data)   
 ```
 
