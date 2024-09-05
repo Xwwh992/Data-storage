@@ -221,3 +221,132 @@ for k in range(20):
   print(k, loss.data)   
 ```
 
+## 语言模型(bigram)
+
+-  **单个神经元一次只对一个输入进行运算**，但通过**矩阵运算和批处理**，神经网络能够一次并行处理多个输入样本，把几个输入组合成一个大的矩阵，认为这个矩阵就是当前的一个输入。通过**批处理（batch processing）**实现并行计算
+- 如果你只生成 `5x1` 的输出，那么你只能为每个输入样本输出一个**具体的结果**，而无法得到预测的概率分布。这种情况下，你的模型只能做出一个**硬预测**（即每次只能预测一个特定的字符），但在大多数机器学习问题中，我们希望模型能够**输出概率分布**，以便：
+  - **进行进一步分析**（比如衡量模型的不确定性）。
+  - **用于训练和优化**，特别是在反向传播中，概率分布可以帮助计算更合适的损失函数（如交叉熵损失）。
+- **L2正则化**
+  - **防止权重过大**：L2正则化通过限制权重的大小，避免模型过度拟合训练数据。
+  - **简化模型**：减小权重的数值，等同于减少模型的复杂性，使其更平滑，从而提升泛化能力。
+  - **抑制噪声影响**：正则化帮助模型忽略数据中的噪声，避免模型对训练数据的过度拟合。
+
+```py
+words = open('names.txt', 'r').read().splitlines()
+
+N = torch.zeros((27, 27), dtype=torch.int32) #用来记录每个字母对出现的频数
+
+chars = sorted(list(set(''.join(words)))) # 构建一个26个字母的字母集合而且从小到大排列
+stoi = {s:i+1 for i,s in enumerate(chars)} # 构建了一个包含'.'的从字母到数字的字典 a-1,b-2,etc
+stoi['.'] = 0
+itos = {i:s for s,i in stoi.items()}  #构建从数字到字母的映射
+for w in words:
+  chs = ['.'] + list(w) + ['.']   # 利用添加.来记录名字开头的字母和名字结尾的字母
+  for ch1, ch2 in zip(chs, chs[1:]):
+    ix1 = stoi[ch1]
+    ix2 = stoi[ch2]
+    N[ix1, ix2] += 1
+    
+P = (N+1).float()  #加1是为了避免有些组合出现的频数是0，这样会导致计算负对数似然的时候出现无穷，加的越多，越uniform
+# module smoothing
+P /= P.sum(1, keepdims=True)# 这里求的是行向量的和，如果不使用keepdims，会导致本该产生的列向量变行向量   
+g = torch.Generator().manual_seed(2147483647) # 创建generator
+
+for i in range(5):  # 测试输出的结果
+  out = []
+  ix = 0
+  while True:
+    p = P[ix]
+    ix = torch.multinomial(p, num_samples=1, replacement=True, generator=g).item()#给出按照概率来预测的采样
+    out.append(itos[ix])
+    if ix == 0:
+      break
+  print(''.join(out))
+# GOAL: maximize likelihood of the data w.r.t. model parameters (statistical modeling)
+# equivalent to maximizing the log likelihood (because log is monotonic)
+# equivalent to minimizing the negative log likelihood
+# equivalent to minimizing the average negative log likelihood
+log_likelihood = 0.0
+n = 0
+
+ #-----------------------------通过简单的计算出现的频率来计算loss------------------------
+for w in words:
+#for w in ["andrejq"]:       #可以衡量给出的一个具体的名字用当前模型预测的quality
+  chs = ['.'] + list(w) + ['.'] 
+  for ch1, ch2 in zip(chs, chs[1:]):
+    ix1 = stoi[ch1]
+    ix2 = stoi[ch2]
+    prob = P[ix1, ix2]
+    logprob = torch.log(prob)
+    log_likelihood += logprob
+    n += 1
+    #print(f'{ch1}{ch2}: {prob:.4f} {logprob:.4f}')
+
+print(f'{log_likelihood=}')
+nll = -log_likelihood    #负对数似然
+print(f'{nll=}')
+print(f'{nll/n}')    # 负对数似然的平均值
+
+# ----------------- !!! OPTIMIZATION !!! yay, but this time actually --------------
+# create the dataset
+xs, ys = [], []
+for w in words:
+  chs = ['.'] + list(w) + ['.']
+  for ch1, ch2 in zip(chs, chs[1:]):
+    ix1 = stoi[ch1]
+    ix2 = stoi[ch2]
+    xs.append(ix1)
+    ys.append(ix2)
+xs = torch.tensor(xs)
+ys = torch.tensor(ys)
+num = xs.nelement()
+print('number of examples: ', num)
+
+# initialize the 'network'
+g = torch.Generator().manual_seed(2147483647)
+W = torch.randn((27, 27), generator=g, requires_grad=True)
+# gradient descent
+for k in range(1):
+  
+  # forward pass
+  xenc = F.one_hot(xs, num_classes=27).float() # input to the network: one-hot encoding
+  logits = xenc @ W # predict log-counts
+  counts = logits.exp() # counts, equivalent to N
+  probs = counts / counts.sum(1, keepdims=True) # probabilities for next character
+  loss = -probs[torch.arange(num), ys].log().mean() + 0.01*(W**2).mean() # regularization term
+  print(loss.item())
+  
+  # backward pass
+  W.grad = None # set to zero the gradient
+  loss.backward()
+  
+  # update
+  W.data += -50 * W.grad
+# finally, sample from the 'neural net' model
+g = torch.Generator().manual_seed(2147483647)
+
+for i in range(5):
+  
+  out = []
+  ix = 0
+  while True:
+    
+    # ----------
+    # BEFORE:
+    #p = P[ix]
+    # ----------
+    # NOW:
+    xenc = F.one_hot(torch.tensor([ix]), num_classes=27).float()
+    logits = xenc @ W # predict log-counts
+    counts = logits.exp() # counts, equivalent to N
+    p = counts / counts.sum(1, keepdims=True) # probabilities for next character
+    # ----------
+    
+    ix = torch.multinomial(p, num_samples=1, replacement=True, generator=g).item()
+    out.append(itos[ix])
+    if ix == 0:
+      break
+  print(''.join(out))
+```
+

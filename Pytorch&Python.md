@@ -1,5 +1,3 @@
-
-
 ## Pytorch 
 
 ### 训练流程
@@ -20,10 +18,87 @@
 
 8. 测试的时候设置`with torch.no_grad()`
 
+```py
+class Network(nn.Module):
+    def __init__(self):
+        super(Network, self).__init__()
+
+        self.model1 = Sequential(
+            Conv2d(in_channels=3, out_channels=32, kernel_size=5, stride=1, padding=2),
+            MaxPool2d(kernel_size=2),
+            Conv2d(in_channels=32, out_channels=32, kernel_size=5, padding=2),
+            MaxPool2d(2),
+            Conv2d(in_channels=32, out_channels=64, kernel_size=5, padding=2),
+            MaxPool2d(2),
+            Flatten(),
+            Linear(in_features=1024, out_features=64),
+            Linear(in_features=64, out_features=10)
+        )
+
+    def forward(self, x):
+        x = self.model1(x)
+        return x
+```
+
+```py
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+if __name__ == "__main__":
+    train_data = torchvision.datasets.CIFAR10("../datasetCIF", train=True, transform=torchvision.transforms.ToTensor(),
+                                              download=True)
+    test_data = torchvision.datasets.CIFAR10("../datasetCIF", train=False, transform=torchvision.transforms.ToTensor(),
+                                             download=True)
+    test_datasize = len(test_data)
+
+    # print(test_data.class_to_idx)
+
+    # 尝试降低 num_workers 的值
+    train_dataloader = DataLoader(train_data, batch_size=64, shuffle=True, drop_last=True)
+    test_dataloader = DataLoader(test_data, batch_size=64, shuffle=True, drop_last=True)
+
+    network = Network().to(device)  # 将模型移动到 GPU
+     loss_fn = nn.CrossEntropyLoss().to(device)  # 将损失函数移动到 GPU
+    learning_rate = 1e-2
+    optimizer = torch.optim.SGD(network.parameters(), learning_rate)
+
+    total_train_step = 0
+    total_test_step = 0
+    epoch = 20
+writer = SummaryWriter("../0831")
+
+for i in range(epoch):
+    print("--------------第{}轮训练----------------".format(i + 1))
+    for input, target in train_dataloader:
+        input, target = input.to(device), target.to(device)  # 将数据移动到 GPU
+        output = network(input)
+        loss = loss_fn(output, target)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        total_train_step += 1
+        if total_train_step % 100 == 0:
+            print("训练次数:{},Loss:{}".format(total_train_step, loss.item()))
+            writer.add_scalar("train_loss", loss.item(), total_train_step)
+
+    total_test_loss = 0
+    total_accuracy = 0
+    with torch.no_grad():
+        for input, target in test_dataloader:
+            input, target = input.to(device), target.to(device)  # 将数据移动到 GPU
+            output = network(input)
+            loss = loss_fn(output, target)
+            total_test_loss += loss
+            accuracy = (output.argmax(1) == target).sum()
+            total_accuracy += accuracy
+    print("整体测试集上的误差：{}".format(total_test_loss))
+    print("整体测试集上的正确率：{}".format(total_accuracy / test_datasize))
+    writer.add_scalar("test_accuracy", total_accuracy / test_datasize, total_test_step)
+    writer.add_scalar("test_loss", total_test_loss, total_test_step)
+    total_test_step += 1
+    torch.save(network, "network_{}".format(i))
+```
+
 ---
-
-   
-
 ```python
 accuracy=(output.argmax(1)==target).sum()
 ```
@@ -31,9 +106,6 @@ accuracy=(output.argmax(1)==target).sum()
 - 在分类识别的情况下，输出结果是一个n维的向量，其中是预测为每种种类的概率，用`argmax(1)`来横向阅读，然后判断是否为目标值，根据判断把向量中置为True或者False，然后相加得出正确识别的个数。
 
 ---
-
-  
-
 ```
 writer=SummaryWriter(“dir")
 tensorboard --logdir="dir"
@@ -42,9 +114,6 @@ tensorboard --logdir="dir"
 - 使用Tensorboard的方法
 
 ---
-
-  
-
 ### 使用GPU
 
 ```python
@@ -56,7 +125,6 @@ network = Network().to(device)
    # 将输入和目标都移到GPU上
         input, target = input.to(device), target.to(device)
 ```
-
 ---
 - 用`model.train()`切换到训练模式
 - `model.eval()`与`torch.no_grad`结合来评估
@@ -78,6 +146,115 @@ self.w = [Value(random.uniform(-1,1)) for _ in range(nin)]
     - `True`: 表示有放回的采样，即同一个事件可以被多次选中。
     - `False`: 表示无放回的采样，即一个事件一旦被选中，就不会再被选中（不能重复）。
   - **`generator`**: 用于控制随机性，保证结果的可复现性。使用 `torch.Generator` 来控制种子。
+
+---
+
+- torch.sum(*input*, *dim*, *keepdim=False*, ***, *dtype=None*) → [Tensor](https://pytorch.org/docs/stable/tensors.html#torch.Tensor)
+  - 维度0的方向是行方向，对每一列求和。维度1的方向是列方向，对每一行求和
+
+
+```python
+>>> a = torch.randn(4, 4)
+>>> a
+tensor([[ 0.0569, -0.2475,  0.0737, -0.3429],
+        [-0.2993,  0.9138,  0.9337, -1.6864],
+        [ 0.1132,  0.7892, -0.1003,  0.5688],
+        [ 0.3637, -0.9906, -0.4752, -1.5197]])
+>>> torch.sum(a, 1)
+tensor([-0.4598, -0.1381,  1.3708, -2.6217])
+```
+---
+- **Broadcasting** semantics
+
+```python
+>>> x=torch.empty(5,7,3)
+>>> y=torch.empty(5,7,3)
+# same shapes are always broadcastable (i.e. the above rules always hold)
+
+>>> x=torch.empty((0,))
+>>> y=torch.empty(2,2)
+# x and y are not broadcastable, because x does not have at least 1 dimension
+
+# can line up trailing dimensions
+>>> x=torch.empty(5,3,4,1)
+>>> y=torch.empty(  3,1,1)
+# x and y are broadcastable.
+# 1st trailing dimension: both have size 1
+# 2nd trailing dimension: y has size 1
+# 3rd trailing dimension: x size == y size
+# 4th trailing dimension: y dimension doesn't exist
+# but:
+>>> x=torch.empty(5,2,4,1)
+>>> y=torch.empty(  3,1,1)
+# x and y are not broadcastable, because in the 3rd trailing dimension 2 != 3
+```
+
+---
+
+- **torch.nn.functional.one_hot(***tensor*, *num_classes=-1*) → LongTensor
+
+```py
+>>> F.one_hot(torch.arange(0, 5) % 3)
+tensor([[1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+        [1, 0, 0],
+        [0, 1, 0]])
+>>> F.one_hot(torch.arange(0, 5) % 3, num_classes=5)
+tensor([[1, 0, 0, 0, 0],
+        [0, 1, 0, 0, 0],
+        [0, 0, 1, 0, 0],
+        [1, 0, 0, 0, 0],
+        [0, 1, 0, 0, 0]])
+>>> F.one_hot(torch.arange(0, 6).view(3,2) % 3)
+tensor([[[1, 0, 0],
+         [0, 1, 0]],
+        [[0, 0, 1],
+         [1, 0, 0]],
+        [[0, 1, 0],
+         [0, 0, 1]]])
+# 在分类问题中，每个类别（如字母）之间没有实际的大小或顺序关系。例如，字母 'a' 和 'b' 分别编码为 1 和 2，它们之间的数值差异没有任何意义。直接使用整数会导致模型可能误解这些数字之间的大小关系，产生错误的学习方向。直接使用整数编码的输入，意味着模型的权重将直接与这些整数相乘。这会导致输入类别之间的参数共享问题，难以学到类别特定的特征。
+# one-hot 编码要求输入的类别数 (num_classes) 大于等于输入数字的范围。如果 num_classes 设置得过小，输入中超过这个范围的数字将无法正确编码，甚至导致错误。
+```
+- 如果你不确定类别数，可以根据数据动态设置 `num_classes`，例如使用 `max(xs) + 1` 来确保 `num_classes` 足够大
+
+```py
+num_classes = xs.max().item() + 1
+xenc = F.one_hot(xs, num_classes=num_classes)
+```
+
+---
+
+torch.randn(**size*, ***, *generator=None*, *out=None*, *dtype=None*, *layout=torch.strided*, *device=None*, *requires_grad=False*, *pin_memory=False*) → [Tensor](https://pytorch.org/docs/stable/tensors.html#torch.Tensor)
+
+```py
+>>> torch.randn(4)
+tensor([-2.1436,  0.9966,  2.3426, -0.6366])
+>>> torch.randn(2, 3)
+tensor([[ 1.5954,  2.8929, -1.0923],
+        [ 1.1719, -0.4709, -0.1996]])
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
