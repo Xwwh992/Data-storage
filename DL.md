@@ -350,3 +350,138 @@ for i in range(5):
   print(''.join(out))
 ```
 
+## 语言模型（trigram)
+
+- #### 对数空间的均匀分布
+
+  - 如果你在 `-3` 到 `0` 之间均匀生成数字，那么这些数字的指数值（即 `10^lre`）将覆盖从 `10^(-3)` 到 `10^0`（即 0.001 到 1）之间的范围。
+  - 这样做是为了避免学习率在小值范围内变化过快，而在大值范围内变化过慢。
+
+- 将**隐藏层变换到更高的维度**的主要原因包括：
+
+  - 提升模型的表达能力，帮助模型学习到更多的复杂特征。
+  - 增强模型的非线性变换能力，使得它能更好地捕捉上下文关系。
+  - 通过更高维度的特征空间，处理更多的信息和模式。
+  - 帮助在欠拟合和过拟合之间找到一个平衡点。
+
+- **展开嵌入向量**
+
+  - 在自然语言处理任务中，比如字符或词的预测，我们通常会输入多个上下文字符或词，通过这些上下文预测下一个字符。为了让模型能够同时看到这些上下文字符的嵌入信息，我们需要将它们拼接成一个完整的向量，这样神经网络可以处理整个上下文，而不仅仅是单个字符。在这种情况下，每个字符的嵌入向量是 10 维的，3 个字符的上下文就会形成一个 30 维的向量。通过展开，神经网络就能同时看到这 3 个字符的信息，并通过训练找到它们和下一个字符之间的关系。
+
+```py
+import torch
+import torch.nn.functional as F
+words = open('names.txt', 'r').read().splitlines()
+len(words)
+# build the vocabulary of characters and mappings to/from integers
+chars = sorted(list(set(''.join(words))))
+stoi = {s:i+1 for i,s in enumerate(chars)}
+stoi['.'] = 0
+itos = {i:s for s,i in stoi.items()}
+print(itos)
+# build the dataset
+
+block_size = 3 # context length: how many characters do we take to predict the next one?
+X, Y = [], []
+for w in words:
+  
+  #print(w)
+  context = [0] * block_size
+  for ch in w + '.':
+    ix = stoi[ch]
+    X.append(context)
+    Y.append(ix)
+    #print(''.join(itos[i] for i in context), '--->', itos[ix])
+    context = context[1:] + [ix] # crop and append
+  
+X = torch.tensor(X)
+Y = torch.tensor(Y)
+
+# build the dataset
+block_size = 3 # context length: how many characters do we take to predict the next one?
+
+def build_dataset(words):  
+  X, Y = [], []
+  for w in words:
+
+    #print(w)
+    context = [0] * block_size
+    for ch in w + '.':
+      ix = stoi[ch]
+      X.append(context)
+      Y.append(ix)
+      #print(''.join(itos[i] for i in context), '--->', itos[ix])
+      context = context[1:] + [ix] # crop and append  去除第一个然后新加入一个
+
+  X = torch.tensor(X)
+  Y = torch.tensor(Y)
+  print(X.shape, Y.shape)
+  return X, Y
+
+import random
+random.seed(42)
+random.shuffle(words)
+n1 = int(0.8*len(words))  #划分训练集、验证集和测试集
+n2 = int(0.9*len(words))
+
+Xtr, Ytr = build_dataset(words[:n1])
+Xdev, Ydev = build_dataset(words[n1:n2])
+Xte, Yte = build_dataset(words[n2:])
+# ------------ now made respectable :) ---------------
+g = torch.Generator().manual_seed(2147483647) # for reproducibility
+C = torch.randn((27, 10), generator=g)
+W1 = torch.randn((30, 200), generator=g)  #上文的数目*映射到的维度数
+b1 = torch.randn(200, generator=g)
+W2 = torch.randn((200, 27), generator=g)
+b2 = torch.randn(27, generator=g)
+parameters = [C, W1, b1, W2, b2]
+sum(p.nelement() for p in parameters) # number of parameters in total
+for p in parameters:
+  p.requires_grad = True
+  
+lre = torch.linspace(-3, 0, 1000)
+lrs = 10**lre
+lri = []  # 存储每次迭代的学习率
+lossi = []  # 存储每次迭代的损失值
+stepi = []  # 存储每次迭代的步数
+
+for i in range(200000):  # 训练 200,000 步
+    # minibatch construct
+    ix = torch.randint(0, Xtr.shape[0], (32,))  # 随机选择 32 个样本进行训练
+ 
+  # 前向传播
+    emb = C[Xtr[ix]]  # (32, 3, 10) 从嵌入矩阵中查找对应的嵌入向量
+    h = torch.tanh(emb.view(-1, 30) @ W1 + b1)  # (32, 200) 使用 tanh 激活函数，计算隐藏层输出
+    logits = h @ W2 + b2  # (32, 27) 计算输出层 logits
+    loss = F.cross_entropy(logits, Ytr[ix])  # 计算交叉熵损失
+
+  #print(loss.item())
+  
+  # backward pass
+  for p in parameters:
+    p.grad = None
+  loss.backward()
+  
+  # update
+  #lr = lrs[i]
+  lr = 0.1 if i < 100000 else 0.01
+  for p in parameters:
+    p.data += -lr * p.grad
+
+  # track stats
+  #lri.append(lre[i])
+  stepi.append(i)
+  lossi.append(loss.log10().item())
+
+#print(loss.item())
+emb = C[Xtr] # (32, 3, 2)
+h = torch.tanh(emb.view(-1, 30) @ W1 + b1) # (32, 100)
+logits = h @ W2 + b2 # (32, 27)
+loss = F.cross_entropy(logits, Ytr)
+
+emb = C[Xdev] # (32, 3, 2)
+h = torch.tanh(emb.view(-1, 30) @ W1 + b1) # (32, 100)
+logits = h @ W2 + b2 # (32, 27)
+loss = F.cross_entropy(logits, Ydev)
+```
+
