@@ -350,13 +350,12 @@ for i in range(5):
   print(''.join(out))
 ```
 
-## 语言模型（trigram)
+## 语言模型（trigram+MLP)
 
-- #### 对数空间的均匀分布
-
+- **对数空间的均匀分布**
   - 如果你在 `-3` 到 `0` 之间均匀生成数字，那么这些数字的指数值（即 `10^lre`）将覆盖从 `10^(-3)` 到 `10^0`（即 0.001 到 1）之间的范围。
   - 这样做是为了避免学习率在小值范围内变化过快，而在大值范围内变化过慢。
-
+  
 - 将**隐藏层变换到更高的维度**的主要原因包括：
 
   - 提升模型的表达能力，帮助模型学习到更多的复杂特征。
@@ -367,6 +366,17 @@ for i in range(5):
 - **展开嵌入向量**
 
   - 在自然语言处理任务中，比如字符或词的预测，我们通常会输入多个上下文字符或词，通过这些上下文预测下一个字符。为了让模型能够同时看到这些上下文字符的嵌入信息，我们需要将它们拼接成一个完整的向量，这样神经网络可以处理整个上下文，而不仅仅是单个字符。在这种情况下，每个字符的嵌入向量是 10 维的，3 个字符的上下文就会形成一个 30 维的向量。通过展开，神经网络就能同时看到这 3 个字符的信息，并通过训练找到它们和下一个字符之间的关系。
+  
+- **Mini-batch&Batch&SGD**
+  - **大数据集**：小批量梯度下降（Mini-batch）是常用选择。可以利用并行计算，平衡了计算效率与更新稳定性。
+  - **数据量较小**：批量梯度下降可以直接使用。
+  - **高频率快速更新需求**：随机梯度下降适合快速迭代和跳出局部最优，但需要配合其他技术（如学习率调整）稳定训练。
+
+| 方法       | 每次更新样本量 | 优点                                   | 缺点                       |
+| ---------- | -------------- | -------------------------------------- | -------------------------- |
+| SGD        | 1              | 更新频繁，适合大数据集，能跳出局部最优 | 噪声大，收敛不稳定         |
+| Mini-batch | 小批量 (如32)  | 利用硬件并行，稳定性好，收敛速度快     | 仍有噪声，批量大小需要调节 |
+| Batch      | 全集           | 稳定，准确                             | 计算代价大，收敛速度慢     |
 
 ```py
 import torch
@@ -397,10 +407,7 @@ for w in words:
 X = torch.tensor(X)
 Y = torch.tensor(Y)
 
-# build the dataset
-block_size = 3 # context length: how many characters do we take to predict the next one?
-
-def build_dataset(words):  
+def build_dataset(words):  #分割数据集
   X, Y = [], []
   for w in words:
 
@@ -431,7 +438,7 @@ Xte, Yte = build_dataset(words[n2:])
 g = torch.Generator().manual_seed(2147483647) # for reproducibility
 C = torch.randn((27, 10), generator=g)
 W1 = torch.randn((30, 200), generator=g)  #上文的数目*映射到的维度数
-b1 = torch.randn(200, generator=g)
+b1 = torch.randn(200, generator=g)   # MLP隐藏层
 W2 = torch.randn((200, 27), generator=g)
 b2 = torch.randn(27, generator=g)
 parameters = [C, W1, b1, W2, b2]
@@ -484,4 +491,3 @@ h = torch.tanh(emb.view(-1, 30) @ W1 + b1) # (32, 100)
 logits = h @ W2 + b2 # (32, 27)
 loss = F.cross_entropy(logits, Ydev)
 ```
-
