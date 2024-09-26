@@ -250,6 +250,35 @@ tensor([[-1.2360, -0.2942, -0.1222,  0.8475],
 torch.return_types.max(values=tensor([0.8475, 1.1949, 1.5717, 1.0036]), indices=tensor([3, 0, 0, 1]))
 ```
 
+---
+
+torch.no_grad()
+
+```py
+>>> x = torch.tensor([1.], requires_grad=True)
+>>> with torch.no_grad():
+...     y = x * 2
+>>> y.requires_grad
+False
+>>> @torch.no_grad()
+... def doubler(x):
+...     return x * 2
+>>> z = doubler(x)
+>>> z.requires_grad
+False
+>>> @torch.no_grad
+... def tripler(x):
+...     return x * 3
+>>> z = tripler(x)
+>>> z.requires_grad
+False
+>>> # factory function exception
+>>> with torch.no_grad():
+...     a = torch.nn.Parameter(torch.rand(10))
+>>> a.requires_grad
+True
+```
+
 
 
 
@@ -351,5 +380,11 @@ stoi = {s: i for i, s in enumerate(chars)}
 
 ---
 
-
+```py
+x,y = {
+    'train': (Xtr, Ytr),
+    'val': (Xdev, Ydev),
+    'test': (Xte, Yte),
+  }[split]     # 根据split来索引字典，然后x,y是对应的拆包
+```
 
