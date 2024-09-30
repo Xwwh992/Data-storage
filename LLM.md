@@ -1031,3 +1031,322 @@ eval_loss('dev')
 
 ```
 
+## GPT（Pre-train)
+
+### Attention
+
+- Attention is a **communication mechanism**. Can be seen as nodes in a directed graph looking at each other and aggregating information with a weighted sum from all nodes that point to them, with data-dependent weights.
+- There is no notion of space. Attention simply acts over a set of vectors. This is why we need to positionally encode tokens.
+- Each example across batch dimension is of course processed completely independently and never "talk" to each other
+- In an "encoder" attention block just delete the single line that does masking with `tril`, allowing all tokens to communicate. This block here is called a "decoder" attention block because it has triangular masking, and is usually used in autoregressive settings, like language modeling.
+- **"self-attention"** just means that the keys and values are produced from the same source as queries. In "cross-attention", the queries still get produced from x, but the keys and values come from some other, external source (e.g. an encoder module)
+- "Scaled" attention additional **divides `wei` by 1/sqrt(head_size)**. This makes it so when input Q,K are unit variance, wei will be unit variance too and Softmax will stay diffuse and not saturate too much.
+
+```py
+# toy example illustrating how matrix multiplication can be used for a "weighted aggregation"
+torch.manual_seed(42)
+a = torch.tril(torch.ones(3, 3))
+a = a / torch.sum(a, 1, keepdim=True)
+b = torch.randint(0,10,(3,2)).float()
+c = a @ b    #矩阵乘法可以用来进行加权聚合
+print('a=')
+print(a)
+print('--')
+print('b=')
+print(b)
+print('--')
+print('c=')
+print(c)
+
+a=
+tensor([[1.0000, 0.0000, 0.0000],
+        [0.5000, 0.5000, 0.0000],
+        [0.3333, 0.3333, 0.3333]])
+--
+b=
+tensor([[2., 7.],
+        [6., 4.],
+        [6., 5.]])
+--
+c=
+tensor([[2.0000, 7.0000],
+        [4.0000, 5.5000],
+        [4.6667, 5.3333]])  
+```
+
+```py
+# consider the following toy example:
+
+torch.manual_seed(1337)
+B,T,C = 4,8,2 # batch, time, channels
+x = torch.randn(B,T,C)
+
+# We want x[b,t] = mean_{i<=t} x[b,i]
+xbow = torch.zeros((B,T,C))
+for b in range(B):
+    for t in range(T):
+        xprev = x[b,:t+1] # (t,C)
+        xbow[b,t] = torch.mean(xprev, 0)
+# version 2: using matrix multiply for a weighted aggregation
+wei = torch.tril(torch.ones(T, T))
+wei = wei / wei.sum(1, keepdim=True)
+xbow2 = wei @ x # (B, T, T) @ (B, T, C) ----> (B, T, C)
+
+# version 3: use Softmax
+tril = torch.tril(torch.ones(T, T))
+wei = torch.zeros((T,T))
+wei = wei.masked_fill(tril == 0, float('-inf'))
+wei = F.softmax(wei, dim=-1)
+xbow3 = wei @ x
+
+# version 4: self-attention!
+torch.manual_seed(1337)
+B,T,C = 4,8,32 # batch, time, channels
+x = torch.randn(B,T,C)
+
+# let's see a single Head perform self-attention
+head_size = 16
+key = nn.Linear(C, head_size, bias=False)
+query = nn.Linear(C, head_size, bias=False)
+value = nn.Linear(C, head_size, bias=False)
+k = key(x)   # (B, T, 16)
+q = query(x) # (B, T, 16)
+wei =  q @ k.transpose(-2, -1) # (B, T, 16) @ (B, 16, T) ---> (B, T, T)
+
+tril = torch.tril(torch.ones(T, T))
+#wei = torch.zeros((T,T))
+wei = wei.masked_fill(tril == 0, float('-inf'))
+wei = F.softmax(wei, dim=-1)
+
+v = value(x)
+out = wei @ v
+#out = wei @ x
+```
+
+### GPT
+
+```py
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+
+# 超参数设置
+batch_size = 64  # 并行处理的独立序列数
+block_size = 256  # 预测的最大上下文长度
+max_iters = 5000  # 最大训练迭代次数
+eval_interval = 500  # 评估间隔
+learning_rate = 3e-4  # 学习率
+device = 'cuda' if torch.cuda.is_available() else 'cpu'  # 使用GPU或CPU
+eval_iters = 200  # 评估迭代次数
+n_embd = 384  # 嵌入维度
+n_head = 6  # 注意力头的数量
+n_layer = 6  # Transformer层的数量
+dropout = 0.2  # dropout概率
+
+torch.manual_seed(1337)  # 设置随机种子以保证结果可复现
+
+# 读取文本数据
+with open('input.txt', 'r', encoding='utf-8') as f:
+    text = f.read()
+
+# 获取文本中的所有唯一字符
+chars = sorted(list(set(text)))
+vocab_size = len(chars)  # 词汇表大小
+# 创建字符到整数的映射
+stoi = {ch: i for i, ch in enumerate(chars)}  # 字符到索引的映射
+itos = {i: ch for i, ch in enumerate(chars)}  # 索引到字符的映射
+encode = lambda s: [stoi[c] for c in s]  # 编码函数：字符串转整数列表
+decode = lambda l: ''.join([itos[i] for i in l])  # 解码函数：整数列表转字符串
+
+# 训练和测试数据划分
+data = torch.tensor(encode(text), dtype=torch.long)  # 将编码后的数据转换为Tensor
+n = int(0.9 * len(data))  # 前90%作为训练集，后10%作为验证集
+train_data = data[:n]
+val_data = data[n:]
+
+# 数据加载函数
+def get_batch(split):
+    # 生成一小批次的输入x和目标y
+    data = train_data if split == 'train' else val_data
+    ix = torch.randint(len(data) - block_size, (batch_size,))  # 随机选择起始索引  减去blocksize防止越界
+    x = torch.stack([data[i:i + block_size] for i in ix])  # 生成输入序列
+    y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])  # 生成目标序列
+    x, y = x.to(device), y.to(device)  # 将数据移动到指定设备
+    return x, y
+
+@torch.no_grad()  # 禁用梯度计算
+def estimate_loss():
+    out = {}
+    model.eval()  # 切换到评估模式
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)  # 初始化损失数组
+        for k in range(eval_iters):
+            X, Y = get_batch(split)  # 获取批次数据
+            logits, loss = model(X, Y)  # 前向传播
+            losses[k] = loss.item()  # 记录损失
+        out[split] = losses.mean()  # 计算平均损失
+    model.train()  # 切换回训练模式
+    return out
+
+class Head(nn.Module):
+    """ 单头自注意力 """
+
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_embd, head_size, bias=False)  # 线性变换生成键
+        self.query = nn.Linear(n_embd, head_size, bias=False)  # 线性变换生成查询
+        self.value = nn.Linear(n_embd, head_size, bias=False)  # 线性变换生成值
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))  # 下三角矩阵用于遮蔽
+
+        self.dropout = nn.Dropout(dropout)  # dropout层
+
+    def forward(self, x):
+        # 输入形状为 (batch, time-step, channels)
+        B, T, C = x.shape
+        k = self.key(x)   # (B, T, hs)
+        q = self.query(x) # (B, T, hs)
+        # 计算注意力分数（"亲和度"）
+        wei = q @ k.transpose(-2, -1) * k.shape[-1]**-0.5  # (B, T, hs) @ (B, hs, T) -> (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))  # 应用遮蔽
+        wei = F.softmax(wei, dim=-1)  # 归一化
+        wei = self.dropout(wei)  # 应用dropout
+        # 进行加权聚合
+        v = self.value(x)  # (B, T, hs)
+        out = wei @ v  # (B, T, T) @ (B, T, hs) -> (B, T, hs)
+        return out
+
+class MultiHeadAttention(nn.Module):
+    """ 多头自注意力 """
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])  # 创建多个头
+        self.proj = nn.Linear(head_size * num_heads, n_embd)  # 学习到不同权重组合而不是简单拼接
+        self.dropout = nn.Dropout(dropout)  # dropout层
+
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim=-1)  # 合并所有头的输出
+        out = self.dropout(self.proj(out))  # 线性变换和dropout
+        return out
+
+class FeedFoward(nn.Module):
+    """ 简单的线性层后跟非线性激活 """
+
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(         
+            nn.Linear(n_embd, 4 * n_embd),  # 扩展维度 在小的维度上，激活函数可能无法发挥其潜力。扩展维度后，再进行非线性激活，能够有效地使得更多的神经元激活，产生丰富的特征表示 
+            nn.ReLU(),  # 非线性激活
+            nn.Linear(4 * n_embd, n_embd),  # 收缩回原维度
+            nn.Dropout(dropout),  # dropout层
+        )
+
+    def forward(self, x):
+        return self.net(x)  # 前向传播
+
+class Block(nn.Module):
+    """ Transformer块：通信后计算 """
+
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head  # 每个头的维度
+        self.sa = MultiHeadAttention(n_head, head_size)  # 自注意力层
+        self.ffwd = FeedFoward(n_embd)  # 前馈层
+        self.ln1 = nn.LayerNorm(n_embd)  # 第一个层归一化
+        self.ln2 = nn.LayerNorm(n_embd)  # 第二个层归一化
+
+    def forward(self, x):
+        x = x + self.sa(self.ln1(x))  # 残差连接和自注意力
+        x = x + self.ffwd(self.ln2(x))  # 残差连接和前馈层
+        return x
+
+class GPTLanguageModel(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        # 每个token直接从查找表中读取下一个token的logits
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)  # 词嵌入层
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)  # 位置嵌入层
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])  # 多个Transformer块 *用于解包block 将每个block以独立的参数传入sequential，按顺序组合形成整体网络结构
+        self.ln_f = nn.LayerNorm(n_embd)  # 最后的层归一化
+        self.lm_head = nn.Linear(n_embd, vocab_size)  # 输出层
+
+        # 初始化权重
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)  # 使用正态分布初始化权重
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)  # 偏置初始化为零
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)  # 嵌入权重初始化
+
+    def forward(self, idx, targets=None):
+      B, T = idx.shape  # 获取批量大小B和时间步长T
+
+      # idx和targets都是形状为(B,T)的整数张量
+      tok_emb = self.token_embedding_table(idx)  # 将输入索引转换为token嵌入，形状为(B,T,C)
+      pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # 获取位置嵌入，形状为(T,C)
+      x = tok_emb + pos_emb  # 将token嵌入和位置嵌入相加，形状为(B,T,C)
+      x = self.blocks(x)  # 通过多个Transformer块处理嵌入，形状保持为(B,T,C)
+      x = self.ln_f(x)  # 应用最终的LayerNorm，形状依旧为(B,T,C)
+      logits = self.lm_head(x)  # 通过线性层得到每个时间步的logits，形状为(B,T,vocab_size)
+
+      if targets is None:
+          loss = None  # 如果没有提供targets，则损失为None
+      else:
+          B, T, C = logits.shape  # 获取logits的形状
+          logits = logits.view(B*T, C)  # 将logits重塑为(B*T, C)以便计算损失
+          targets = targets.view(B*T)  # 将targets重塑为(B*T)
+          loss = F.cross_entropy(logits, targets)  # 计算交叉熵损失
+
+      return logits, loss  # 返回logits和损失
+
+    def generate(self, idx, max_new_tokens):
+        # idx是当前上下文的(B, T)索引数组
+        for _ in range(max_new_tokens):
+            # 裁剪idx到最后的block_size个token
+            idx_cond = idx[:, -block_size:]
+            # 获取预测结果
+            logits, loss = self(idx_cond)
+            # 只关注最后一个时间步的logits
+            logits = logits[:, -1, :]  # 变为(B, C)
+            # 应用softmax获取概率分布
+            probs = F.softmax(logits, dim=-1)  # (B, C)
+            # 从概率分布中采样下一个token的索引
+            idx_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
+            # 将采样的索引添加到当前序列中
+            idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
+        return idx  # 返回生成的新索引序列
+
+model = GPTLanguageModel()  # 实例化模型
+m = model.to(device)  # 将模型转移到计算设备上
+# 打印模型参数数量
+print(sum(p.numel() for p in m.parameters()) / 1e6, 'M parameters')
+
+# 创建PyTorch优化器
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+for iter in range(max_iters):
+    # 每隔一段时间评估训练集和验证集的损失
+    if iter % eval_interval == 0 or iter == max_iters - 1:
+        losses = estimate_loss()  # 评估损失
+        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+    # 采样一批数据
+    xb, yb = get_batch('train')
+
+    # 评估损失
+    logits, loss = model(xb, yb)
+    optimizer.zero_grad(set_to_none=True)  # 清除梯度
+    loss.backward()  # 反向传播
+    optimizer.step()  # 更新参数
+
+# 从模型生成文本
+context = torch.zeros((1, 1), dtype=torch.long, device=device)  # 初始化上下文为零
+print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))  # 生成500个新token并解码为字符串
+# open('more.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))  # 生成10000个token并保存到文件
+
+```
+
