@@ -1,3 +1,1 @@
-# DL-Study
-
-**Try to learn.**
+Data storage.
